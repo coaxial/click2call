@@ -13,26 +13,28 @@ $debug = false;
 function checkExecution($socket, $command) {
   $line = '';
   $response = '';
-  while ($line != "\r\n") {
+  $startTime = time();
+  while ($line != "\r\n" && time() < ($startTime + $GLOBALS['connTimeout'])) {
     $line = fgets($socket, 128);
     $response .= $line;
   }
   if (preg_match('/Response\: (Success|Goodbye)/', $response)) {
     if ($command === 'login') {
       if ($GLOBALS['debug']) echo "login OK\n";
-      return 1;
+      return true;
     }
     if ($command === 'orig') {
       if ($GLOBALS['debug']) echo "orig OK\n";
-      return 1;
+      return true;
     }
     if ($command === 'logoff') {
       if ($GLOBALS['debug']) echo "logoff OK\n";
-      return 1;
+      return true;
     }
   } else {
-    echo "$command NOK\n";
-    return 0;
+    fclose($socket);
+    if ($GLOBALS['debug']) echo "$command NOK\n";
+    return false;
   }
 }
 
@@ -57,6 +59,14 @@ class phoneNumber {
   }
 }
 
+class apiResult {
+  public $socket = false;
+  public $amiLogin = false;
+  public $amiOrig = false;
+  public $amiLogoff = false;
+  public $callSpooled = false;
+}
+
 if ($debug) echo "Raw number is: " . $_POST["callerNumber"] . "\n";
 
 $callerNumber = new phoneNumber;
@@ -79,10 +89,14 @@ if ($debug) echo "callerNumber valid: $callerNumber->isValid\ncallerNumber digit
 if ($debug) echo "lang is: $lang->is\nlang is valid: $lang->isValid\n";
 
 if ($lang->isValid && $callerNumber->isValid) {
+  // creating the jsonResult object
+  $jsonResult = new apiResult();
   // putting together the login message
   $amiLoginMsg = "Action: login\r\nEvents: off\r\nUsername: $asteriskUsername\r\nSecret: $asteriskPassword\r\n\r\n";
+// Uncomment for production
   // putting together the originate message
-  $amiOrigMsg = "Action: originate\r\nChannel: SIP/cwu-pierre/$callerNumber->digits\r\nCallerID: \"$myName\" <$myNumber>\r\nMax Retries: 2\r\nRetry Time: 10\r\nWait Time: 1\r\nContext: webcallback\r\nExten: callMe$lang->is\r\nPriority: 1\r\n\r\n";
+  // $amiOrigMsg = "Action: originate\r\nChannel: SIP/cwu-pierre/$callerNumber->digits\r\nCallerID: \"$myName\" <$myNumber>\r\nMax Retries: 2\r\nRetry Time: 10\r\nWait Time: 1\r\nContext: webcallback\r\nExten: callMe$lang->is\r\nPriority: 1\r\nAsync: yes\r\n\r\n";
+  $amiOrigMsg = "Action: originate\r\nChannel: SIP/pierre-mobile\r\nCallerID: \"$myName\" <$myNumber>\r\nMax Retries: 2\r\nRetry Time: 10\r\nWait Time: 1\r\nContext: webcallback\r\nExten: callMe$lang->is\r\nPriority: 1\r\nSetvar: callernum=$callerNumber->digits\r\nAsync: yes\r\n\r\n";
   // putting together the logoff message
   $amiLogoffMsg = "Action: logoff\r\n\r\n";
 
@@ -90,15 +104,40 @@ if ($lang->isValid && $callerNumber->isValid) {
 
   $socket = fsockopen('tls://'.$asteriskHost, $asteriskAmiPort, $errno, $errstr, $connTimeout);
 
-  fputs($socket, $amiLoginMsg);
-  $resultLogin = checkExecution($socket, 'login');
-  fputs($socket, $amiOrigMsg);
-  $resultOrig = checkExecution($socket, 'orig');
-  fputs($socket, $amiLogoffMsg);
-  $resultLogoff = checkExecution($socket, 'logoff');
-  if ($resultLogin && $resultOrig && $resultLogoff) echo "OK\r\n";
+  if ($socket) {
+    $jsonResult->socket = true;
+    if ($jsonResult->socket) {
+      fputs($socket, $amiLoginMsg);
+      // stream_set_timeout($socket, 4);
+      // $resultLogin = checkExecution($socket, 'login');
+      $jsonResult->amiLogin = checkExecution($socket, 'login');
+    }
+
+    if ($jsonResult->amiLogin) {
+      fputs($socket, $amiOrigMsg);
+      // stream_set_timeout($socket, 4);
+      // $resultOrig = checkExecution($socket, 'orig');
+      $jsonResult->amiOrig = checkExecution($socket, 'orig');
+    }
+
+    if ($jsonResult->amiOrig) {
+      fputs($socket, $amiLogoffMsg);
+      // stream_set_timeout($socket, 4);
+      // $resultLogoff = checkExecution($socket, 'logoff');
+      $jsonResult->amiLogoff = checkExecution($socket, 'logoff');
+    }
+
+    if ($jsonResult->amiLogin && $jsonResult->amiOrig && $jsonResult->amiLogoff) {
+      $jsonResult->callSpooled = true;
+    } else {
+      $jsonResult->callSpooled = false;
+    }
+  } else {
+    $jsonResult->socket = false;
+    $jsonResult->callSpooled = false;
+    if ($debug) echo "-ERR SOCKET: $errno '$errstr'\n";
+  }
 }
 
-echo "\n";
+echo json_encode($jsonResult);
 ?>
-
